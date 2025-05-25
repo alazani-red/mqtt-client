@@ -4,3 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+paho-mqtt = { git = "https://github.com/eclipse/paho.mqtt.rust.git", branch = "master" }
+
+[[bin]]
+name = "sub"
+path = "src/sub/main.rs"
+
+[[bin]]
+name = "pub"
+path = "src/pub/main.rs"
