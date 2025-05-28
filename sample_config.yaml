@@ -1,0 +1,13 @@
+broker: your_broker_host.jp:1883
+client_id: your_client_id
+topics:
+  - target_topic
+  # - target_topic2
+  - 
+qos:
+  - 0
+  # - 1
+  # - 2
+ 
+username: your_username
+password: your_password

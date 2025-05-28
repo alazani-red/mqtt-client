@@ -11,3 +11,5 @@ __pycache__
 *.txt
 *.~lock*
 *.log
+config.yaml
+Cargo.lock
