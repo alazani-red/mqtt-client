@@ -1,53 +1,47 @@
 use std::{
-    env,
-    process,
-    thread,
-    time::Duration,
-    fs,
+    env, fs, io::Seek, process, sync::Arc, time::Duration // For Cursor::rewind
 };
-
-extern crate paho_mqtt as mqtt;
+use rumqttc::{tokio_rustls::rustls::{ClientConfig, RootCertStore}, Client, Event, MqttOptions, Packet, QoS, Transport};
 use serde::Deserialize;
+use tokio::time; // tokio::task は今回は未使用ですが、非同期処理によく使われます
+
+// TODO: ログ出力機能、ログ出力設定を追加する
 
 // 設定ファイルの構造体を定義
 #[derive(Debug, Deserialize)]
 struct Config {
     // brokerフィールドはプロトコル部分（tcp://）を含まない形にする
-    broker_address: String, 
+    scheme: Option<String>,
+    broker_address: String,
     broker_port: u16,
     client_id: String,
     topics: Vec<String>,
     qos: Vec<i32>,
-    // qos: i32,
-    username: String,
-    password: String,
+    username: Option<String>,
+    password: Option<String>,
+    // log_directory: Option<String>,
+    // log_level: Option<String>,
+    // CA証明書のパスを追加
+    ca_cert_path: Option<String>, // 例: "path/to/AmazonRootCA1.pem"
+    // クライアント証明書とキーのパス（相互認証が必要な場合）
+    client_combined_path: Option<String>,
 }
 
-// Reconnect to the broker when connection is lost.
-fn try_reconnect(cli: &mqtt::Client) -> bool
-{
-    println!("Connection lost. Waiting to retry connection");
-    for _ in 0..12 {
-        thread::sleep(Duration::from_millis(5000));
-        if cli.reconnect().is_ok() {
-            println!("Successfully reconnected");
-            return true;
+// 複数のトピックを購読する
+async fn subscribe_topics(cli: &mut Client, topics: &[String], qos_values: &[QoS]) {
+    for (i, topic) in topics.iter().enumerate() {
+        // QoS が指定されていない場合は QoS::AtMostOnce (QoS 0) をデフォルトとする
+        let qos = qos_values.get(i).copied().unwrap_or(QoS::AtMostOnce);
+        if let Err(e) = cli.subscribe(topic, qos) {
+            eprintln!("トピック '{}' (QoS {:?}) の購読中にエラーが発生しました: {:?}", topic, qos, e);
+            process::exit(1);
         }
-    }
-    println!("Unable to reconnect after several attempts.");
-    false
-}
-
-// Subscribes to multiple topics.
-fn subscribe_topics(cli: &mqtt::Client, topics: &[String], qos: &[i32]) {
-    let topic_refs: Vec<&str> = topics.iter().map(|s| s.as_str()).collect();
-    if let Err(e) = cli.subscribe_many(&topic_refs, qos) {
-        println!("Error subscribes topics: {:?}", e);
-        process::exit(1);
+        println!("トピック: '{}' (QoS {:?}) を購読しました。", topic, qos);
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     // 設定ファイルを読み込む
     let config_file = "config.yaml";
     let config: Config = match fs::File::open(config_file) {
@@ -55,95 +49,174 @@ fn main() {
             match serde_yaml::from_reader(file) {
                 Ok(cfg) => cfg,
                 Err(e) => {
-                    eprintln!("Error parsing config file '{}': {}", config_file, e);
+                    eprintln!("設定ファイル '{}' のパース中にエラーが発生しました: {}", config_file, e);
                     process::exit(1);
                 }
             }
         },
         Err(e) => {
-            eprintln!("Error opening config file '{}': {}", config_file, e);
+            eprintln!("設定ファイル '{}' のオープン中にエラーが発生しました: {}", config_file, e);
             process::exit(1);
         }
     };
 
-    // main関数内で"tcp://"を結合
-    // env::args().nth(1)が優先されるように、少しロジックを調整します。
-    let default_broker_uri = format!("tcp://{}:{}", config.broker_address, config.broker_port); // ここで結合
-    let host = env::args().nth(1).unwrap_or_else(||
-        default_broker_uri
-    );
+    let scheme = config.scheme.as_deref().unwrap_or("tcp");
+    let default_broker_uri = format!("{}://{}:{}", scheme, config.broker_address, config.broker_port);
+    let host = env::args().nth(1).unwrap_or_else(|| default_broker_uri);
 
-    // Define the set of options for the create.
-    // Use an ID for a persistent session.
-    let create_opts = mqtt::CreateOptionsBuilder::new()
-        .server_uri(host)
-        .client_id(config.client_id.clone())
-        .finalize();
-
-    // Create a client.
-    let cli = mqtt::Client::new(create_opts).unwrap_or_else(|err| {
-        println!("Error creating the client: {:?}", err);
+    // ホスト文字列からアドレスとポートをパース
+    let parsed_host = host.split("://").nth(1).unwrap_or(&host);
+    let (broker_address, broker_port_str) = parsed_host.split_once(':')
+        .unwrap_or((parsed_host, "1883")); // TLSでない場合のデフォルトポート
+    let broker_port: u16 = broker_port_str.parse().unwrap_or_else(|_| {
+        eprintln!("不正なポート番号です: {}", broker_port_str);
         process::exit(1);
     });
 
-    // Initialize the consumer before connecting.
-    let rx = cli.start_consuming();
+    let mut mqtt_options = MqttOptions::new(config.client_id, broker_address, broker_port);
+    mqtt_options.set_keep_alive(Duration::from_secs(20));
+    mqtt_options.set_clean_session(true);
 
-    // Define the set of options for the connection.
-    let lwt = mqtt::MessageBuilder::new()
-        .topic("test")
-        .payload("Consumer lost connection")
-        .finalize();
-    let conn_opts = mqtt::ConnectOptionsBuilder::new()
-        .keep_alive_interval(Duration::from_secs(20))
-        .clean_session(true)
-        .will_message(lwt)
-        .user_name(config.username.clone())
-        .password(config.password.clone())
-        .finalize();
-
-    // Connect and wait for it to complete or fail.
-    if let Err(e) = cli.connect(conn_opts) {
-        println!("Unable to connect:\n\t{:?}", e);
-        process::exit(1);
+    // ユーザー名とパスワードが指定されていれば設定
+    if let Some(username) = &config.username {
+        let password = config.password.as_deref().unwrap_or("");
+        mqtt_options.set_credentials(username, password);
     }
 
-    let actual_qos: Vec<i32> = if config.qos.len() < config.topics.len() && !config.qos.is_empty() {
-        // QoSがトピック数より少なく、かつqosが空でない場合、最初のQoSを全てのトピックに適用
-        let default_qos = config.qos[0]; // 最初の要素を取得
-        vec![default_qos; config.topics.len()] // トピックの数だけ繰り返す
-    } else if config.qos.is_empty() && !config.topics.is_empty() {
-        // QoSが空で、トピックがある場合、デフォルトQoS(0)を適用
-        vec![0; config.topics.len()]
-    }
-    else {
-        // QoSがトピック数以上ある場合、またはQoSが空だがトピックも空の場合、qosをそのまま使用
-        config.qos.clone()
-    };    
-    
-    subscribe_topics(&cli, &config.topics, &actual_qos);
+    // SSL/TLS 設定
+    if host.starts_with("ssl://") || host.starts_with("mqtts://") {
 
-    println!("Processing requests...");
-    for msg in rx.iter() {
-        if let Some(msg) = msg {
-            println!("{}", msg);
+        let mut root_store = RootCertStore::empty();
+
+        // CA証明書の読み込みと追加
+        if let Some(ca_cert_path) = &config.ca_cert_path {
+            let ca_cert_pem = fs::read(ca_cert_path).unwrap_or_else(|e| {
+                eprintln!("CA証明書 '{}' の読み込み中にエラーが発生しました: {}", ca_cert_path, e);
+                process::exit(1);
+            });
+            let mut ca_certs_reader = std::io::BufReader::new(std::io::Cursor::new(ca_cert_pem));
+            let certs = rustls_pemfile::certs(&mut ca_certs_reader)
+                .filter_map(Result::ok)
+                // .map(|cert_der| RustlsCertificate(cert_der)) 
+                .collect::<Vec<_>>();
+            // root_store.add_parsable_certificates(&certs);
+            for cert in certs {
+                root_store.add(cert).unwrap_or_else(|e| { // add() メソッドは CertificateDer を直接受け取る
+                    eprintln!("CA証明書の追加中にエラーが発生しました: {}", e);
+                    process::exit(1);
+                });
+            }
+        } else {
+            eprintln!("警告: SSL/TLS 接続用に CA 証明書のパスが指定されていません。");
         }
-        else if !cli.is_connected() {
-            if try_reconnect(&cli) {
-                println!("Resubscribe topics...");
-                subscribe_topics(&cli, &config.topics, &config.qos);
-            } else {
-                break;
+
+        // クライアント認証の準備
+        let client_config = if let Some(client_combined_path) = &config.client_combined_path {
+            let cert_key_pem = fs::read(client_combined_path).unwrap_or_else(|e| {
+                eprintln!("クライアント証明書/キーファイル '{}' の読み込み中にエラーが発生しました: {}", client_combined_path, e);
+                process::exit(1);
+            });
+
+            let mut reader = std::io::BufReader::new(std::io::Cursor::new(cert_key_pem));
+            let certs = rustls_pemfile::certs(&mut reader)
+                .filter_map(Result::ok)
+                // .map(RustlsCertificate)
+                .collect::<Vec<_>>();
+            reader.rewind().unwrap();
+
+            let client_key_pkcs8 = rustls_pemfile::pkcs8_private_keys(&mut reader)
+                .filter_map(Result::ok)
+                .next()
+                .unwrap_or_else(|| {
+                    eprintln!("クライアントの秘密鍵が見つかりません。");
+                    process::exit(1);
+                });
+            
+            // PrivatePkcs8KeyDer を PrivateKeyDer::Pkcs8 バリアントでラップする
+            let client_key = rustls_pki_types::PrivateKeyDer::Pkcs8(client_key_pkcs8.into());
+
+            // ClientConfig の構築
+            ClientConfig::builder()
+                .with_root_certificates(root_store)
+                .with_client_auth_cert(certs, client_key) // ここでラップした client_key を使用
+                .unwrap_or_else(|e| {
+                    eprintln!("クライアント認証の設定に失敗しました: {}", e);
+                    process::exit(1);
+                })
+        } else {
+            ClientConfig::builder()
+                .with_root_certificates(root_store)
+                .with_no_client_auth()
+        };
+
+        let tls_config = Arc::new(client_config);
+        mqtt_options.set_transport(Transport::Tls(rumqttc::TlsConfiguration::Rustls(tls_config)));
+    }
+
+    let (mut client, mut eventloop) = Client::new(mqtt_options, 10); // 10 はイベントループのチャネル容量
+
+    // 設定された QoS 値を rumqttc::QoS 型に変換
+    let actual_qos: Vec<QoS> = if config.qos.len() < config.topics.len() && !config.qos.is_empty() {
+        let default_qos_val = config.qos[0];
+        let default_qos = match default_qos_val {
+            0 => QoS::AtMostOnce,
+            1 => QoS::AtLeastOnce,
+            2 => QoS::ExactlyOnce,
+            _ => {
+                eprintln!("設定ファイル内の不正な QoS 値: {}", default_qos_val);
+                process::exit(1);
+            }
+        };
+        vec![default_qos; config.topics.len()]
+    } else if config.qos.is_empty() && !config.topics.is_empty() {
+        vec![QoS::AtMostOnce; config.topics.len()] // デフォルトで QoS 0 を適用
+    } else {
+        config.qos.iter().map(|&q| {
+            match q {
+                0 => QoS::AtMostOnce,
+                1 => QoS::AtLeastOnce,
+                2 => QoS::ExactlyOnce,
+                _ => {
+                    eprintln!("設定ファイル内の不正な QoS 値: {}", q);
+                    process::exit(1);
+                }
+            }
+        }).collect()
+    };
+
+    // トピックの購読
+    subscribe_topics(&mut client, &config.topics, &actual_qos).await;
+
+    println!("MQTT イベントを処理中...");
+    loop {
+        match eventloop.eventloop.poll().await {
+            Ok(event) => {
+                // println!("受信イベント: {:?}", event); // 詳細なイベントログが必要な場合にコメントを外す
+                if let Event::Incoming(Packet::Publish(p)) = event {
+                    println!("トピック: {}", p.topic);
+                    println!("ペイロード: {}", String::from_utf8_lossy(&p.payload));
+                    println!("QoS: {:?}", p.qos);
+                } else if let Event::Incoming(Packet::ConnAck(_)) = event {
+                    println!("ブローカーに接続しました。");
+                    // rumqttc は多くの場合、再接続時に自動的に再購読を処理します。
+                    // 明示的な再購読が必要な場合は、新規接続か再接続かを追跡する必要があるかもしれません。
+                } else if let Event::Outgoing(rumqttc::Outgoing::Disconnect) = event {
+                    println!("ブローカーから切断しました。");
+                    break; // 明示的な切断でループを終了
+                }
+            }
+            Err(e) => {
+                let err_str = e.to_string();
+                if err_str.contains("disconnected") {
+                    eprintln!("ブローカーへの接続が閉じられました。再接続を試行中...");
+                    time::sleep(Duration::from_secs(5)).await;
+                } else {
+                    eprintln!("イベントループでエラーが発生しました: {:?}", e);
+                    time::sleep(Duration::from_secs(1)).await;
+                }
             }
         }
     }
 
-    // If still connected, then disconnect now.
-    if cli.is_connected() {
-        println!("Disconnecting");
-        let topic_refs: Vec<&str> = config.topics.iter().map(|s| s.as_str()).collect();
-        cli.unsubscribe_many(&topic_refs).unwrap();
-        cli.disconnect(None).unwrap();
-    }
-    println!("Exiting");
+    println!("終了します。");
 }

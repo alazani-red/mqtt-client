@@ -13,3 +13,5 @@ __pycache__
 *.log
 config.yaml
 Cargo.lock
+certs/AmazonRootCA1.pem
+new-config.yaml

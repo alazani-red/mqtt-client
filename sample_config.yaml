@@ -1,13 +1,18 @@
-broker: your_broker_host.jp:1883
+# scheme: mqtt
+scheme: mqtts
+# scheme: tcp
+# scheme: ssl
+broker_address: your_broker_host.jp
+# broker_port: 8883
+broker_port: 1883
 client_id: your_client_id
 topics:
   - target_topic
   # - target_topic2
-  - 
 qos:
   - 0
   # - 1
   # - 2
- 
 username: your_username
 password: your_password
+ca_cert_path: "./certs/your_pem_file.pem"
