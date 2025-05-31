@@ -6,13 +6,17 @@ broker_address: your_broker_host.jp
 # broker_port: 8883
 broker_port: 1883
 client_id: your_client_id
-topics:
+topics: # サブスクライブ対象のトピックのリスト ※複数サブスクライブ可能
   - target_topic
   # - target_topic2
-qos:
+qos: # QoSレベルのリスト ※複数指定可能、トピックのリストと同じ数だけ指定するとそれぞれのトピックに対応する。そうでない場合はすべてのトピックに同じQoSが適用される。
   - 0
   # - 1
   # - 2
+# clean_sessionはMQTTのセッションをクリーンにするかどうかを指定します。
+# trueの場合、セッションはクリーンにされ、以前のセッションの状態は保持されません。※デフォルトはtrue
+# falseの場合、以前のセッションの状態が保持されます。
+clean_session: true
 username: your_username
 password: your_password
 ca_cert_path: "./certs/your_pem_file.pem"

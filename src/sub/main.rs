@@ -1,28 +1,28 @@
 use std::{
-    env, fs, io::Seek, process, sync::Arc, time::Duration // For Cursor::rewind
+    fs, io::Seek, process, sync::Arc, time::Duration
 };
 use rumqttc::{tokio_rustls::rustls::{ClientConfig, RootCertStore}, Client, Event, MqttOptions, Packet, QoS, Transport};
 use serde::Deserialize;
-use tokio::time; // tokio::task は今回は未使用ですが、非同期処理によく使われます
+use tokio::time; 
 
 // TODO: ログ出力機能、ログ出力設定を追加する
 
 // 設定ファイルの構造体を定義
 #[derive(Debug, Deserialize)]
 struct Config {
-    // brokerフィールドはプロトコル部分（tcp://）を含まない形にする
     scheme: Option<String>,
     broker_address: String,
     broker_port: u16,
     client_id: String,
     topics: Vec<String>,
     qos: Vec<i32>,
+    clean_session: Option<bool>,
     username: Option<String>,
     password: Option<String>,
     // log_directory: Option<String>,
     // log_level: Option<String>,
     // CA証明書のパスを追加
-    ca_cert_path: Option<String>, // 例: "path/to/AmazonRootCA1.pem"
+    ca_cert_path: Option<String>,
     // クライアント証明書とキーのパス（相互認証が必要な場合）
     client_combined_path: Option<String>,
 }
@@ -60,22 +60,9 @@ async fn main() {
         }
     };
 
-    let scheme = config.scheme.as_deref().unwrap_or("tcp");
-    let default_broker_uri = format!("{}://{}:{}", scheme, config.broker_address, config.broker_port);
-    let host = env::args().nth(1).unwrap_or_else(|| default_broker_uri);
-
-    // ホスト文字列からアドレスとポートをパース
-    let parsed_host = host.split("://").nth(1).unwrap_or(&host);
-    let (broker_address, broker_port_str) = parsed_host.split_once(':')
-        .unwrap_or((parsed_host, "1883")); // TLSでない場合のデフォルトポート
-    let broker_port: u16 = broker_port_str.parse().unwrap_or_else(|_| {
-        eprintln!("不正なポート番号です: {}", broker_port_str);
-        process::exit(1);
-    });
-
-    let mut mqtt_options = MqttOptions::new(config.client_id, broker_address, broker_port);
+    let mut mqtt_options = MqttOptions::new(config.client_id, config.broker_address, config.broker_port);
     mqtt_options.set_keep_alive(Duration::from_secs(20));
-    mqtt_options.set_clean_session(true);
+    mqtt_options.set_clean_session(config.clean_session.unwrap_or(true));
 
     // ユーザー名とパスワードが指定されていれば設定
     if let Some(username) = &config.username {
@@ -84,8 +71,7 @@ async fn main() {
     }
 
     // SSL/TLS 設定
-    if host.starts_with("ssl://") || host.starts_with("mqtts://") {
-
+    if config.scheme.as_deref() == Some("ssl") || config.scheme.as_deref() == Some("mqtts") {
         let mut root_store = RootCertStore::empty();
 
         // CA証明書の読み込みと追加
@@ -97,11 +83,9 @@ async fn main() {
             let mut ca_certs_reader = std::io::BufReader::new(std::io::Cursor::new(ca_cert_pem));
             let certs = rustls_pemfile::certs(&mut ca_certs_reader)
                 .filter_map(Result::ok)
-                // .map(|cert_der| RustlsCertificate(cert_der)) 
                 .collect::<Vec<_>>();
-            // root_store.add_parsable_certificates(&certs);
             for cert in certs {
-                root_store.add(cert).unwrap_or_else(|e| { // add() メソッドは CertificateDer を直接受け取る
+                root_store.add(cert).unwrap_or_else(|e| { 
                     eprintln!("CA証明書の追加中にエラーが発生しました: {}", e);
                     process::exit(1);
                 });
@@ -120,7 +104,6 @@ async fn main() {
             let mut reader = std::io::BufReader::new(std::io::Cursor::new(cert_key_pem));
             let certs = rustls_pemfile::certs(&mut reader)
                 .filter_map(Result::ok)
-                // .map(RustlsCertificate)
                 .collect::<Vec<_>>();
             reader.rewind().unwrap();
 
@@ -132,13 +115,12 @@ async fn main() {
                     process::exit(1);
                 });
             
-            // PrivatePkcs8KeyDer を PrivateKeyDer::Pkcs8 バリアントでラップする
             let client_key = rustls_pki_types::PrivateKeyDer::Pkcs8(client_key_pkcs8.into());
 
             // ClientConfig の構築
             ClientConfig::builder()
                 .with_root_certificates(root_store)
-                .with_client_auth_cert(certs, client_key) // ここでラップした client_key を使用
+                .with_client_auth_cert(certs, client_key)
                 .unwrap_or_else(|e| {
                     eprintln!("クライアント認証の設定に失敗しました: {}", e);
                     process::exit(1);
@@ -198,11 +180,9 @@ async fn main() {
                     println!("QoS: {:?}", p.qos);
                 } else if let Event::Incoming(Packet::ConnAck(_)) = event {
                     println!("ブローカーに接続しました。");
-                    // rumqttc は多くの場合、再接続時に自動的に再購読を処理します。
-                    // 明示的な再購読が必要な場合は、新規接続か再接続かを追跡する必要があるかもしれません。
                 } else if let Event::Outgoing(rumqttc::Outgoing::Disconnect) = event {
                     println!("ブローカーから切断しました。");
-                    break; // 明示的な切断でループを終了
+                    break;  // イベントループを終了
                 }
             }
             Err(e) => {

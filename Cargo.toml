@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-# paho-mqtt = "0.13.3"
 rumqttc = "0.24.0"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1.0.219", features = ["derive"] }
@@ -12,7 +11,6 @@ serde_yaml = "0.9.34-deprecated"
 rustls = "0.23.27" # TLS/SSL を使用する場合
 rustls-pemfile = "2.2.0" # PEM ファイルのパースに必要
 rustls-pki-types = "1.12.0"
-poem = {version = "3.1.10", features = ["rustls"]}
 
 [[bin]]
 name = "sub"
