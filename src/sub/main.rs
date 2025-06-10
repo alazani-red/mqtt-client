@@ -1,31 +1,8 @@
-use std::{
-    fs, io::Seek, process, sync::Arc, time::Duration
-};
+use mqtt_client::common;  // 共通のモジュールをインポート
+use std::{fs, io::Seek, process, sync::Arc, time::Duration};
 use rumqttc::{tokio_rustls::rustls::{ClientConfig, RootCertStore}, Client, Event, MqttOptions, Packet, QoS, Transport};
-use serde::Deserialize;
 use tokio::time; 
-
 // TODO: ログ出力機能、ログ出力設定を追加する
-
-// 設定ファイルの構造体を定義
-#[derive(Debug, Deserialize)]
-struct Config {
-    scheme: Option<String>,
-    broker_address: String,
-    broker_port: u16,
-    client_id: String,
-    topics: Vec<String>,
-    qos: Vec<i32>,
-    clean_session: Option<bool>,
-    username: Option<String>,
-    password: Option<String>,
-    // log_directory: Option<String>,
-    // log_level: Option<String>,
-    // CA証明書のパスを追加
-    ca_cert_path: Option<String>,
-    // クライアント証明書とキーのパス（相互認証が必要な場合）
-    client_combined_path: Option<String>,
-}
 
 // 複数のトピックを購読する
 async fn subscribe_topics(cli: &mut Client, topics: &[String], qos_values: &[QoS]) {
@@ -42,23 +19,9 @@ async fn subscribe_topics(cli: &mut Client, topics: &[String], qos_values: &[QoS
 
 #[tokio::main]
 async fn main() {
+    use common::config_utils::Config; // 設定ファイルの読み込みモジュールをインポート
     // 設定ファイルを読み込む
-    let config_file = "config.yaml";
-    let config: Config = match fs::File::open(config_file) {
-        Ok(file) => {
-            match serde_yaml::from_reader(file) {
-                Ok(cfg) => cfg,
-                Err(e) => {
-                    eprintln!("設定ファイル '{}' のパース中にエラーが発生しました: {}", config_file, e);
-                    process::exit(1);
-                }
-            }
-        },
-        Err(e) => {
-            eprintln!("設定ファイル '{}' のオープン中にエラーが発生しました: {}", config_file, e);
-            process::exit(1);
-        }
-    };
+    let config: Config = common::config_utils::get_config();
 
     let mut mqtt_options = MqttOptions::new(config.client_id, config.broker_address, config.broker_port);
     mqtt_options.set_keep_alive(Duration::from_secs(20));
