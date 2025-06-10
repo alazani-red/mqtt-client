@@ -82,14 +82,13 @@ async fn main() {
             });
             let mut ca_certs_reader = std::io::BufReader::new(std::io::Cursor::new(ca_cert_pem));
             let certs = rustls_pemfile::certs(&mut ca_certs_reader)
-                .filter_map(Result::ok)
-                .collect::<Vec<_>>();
-            for cert in certs {
-                root_store.add(cert).unwrap_or_else(|e| { 
-                    eprintln!("CA証明書の追加中にエラーが発生しました: {}", e);
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap_or_else(|e| {
+                    eprintln!("CA証明書のパース中にエラー: {}", e);
                     process::exit(1);
                 });
-            }
+
+            root_store.add_parsable_certificates(certs);
         } else {
             eprintln!("警告: SSL/TLS 接続用に CA 証明書のパスが指定されていません。");
         }
